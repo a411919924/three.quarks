@@ -14,15 +14,17 @@ import {
     vec4,
 } from 'three/tsl';
 import {RenderMode} from 'three.quarks';
+import {transformMeshParticle} from '../nodes/ParticleNodes';
 
 export interface ParticleSpriteNodeMaterialParameters extends NodeMaterialParameters {
     renderMode?: RenderMode;
 }
 
 /**
- * The node material of billboard particles. It places each instance of the quad at the particle's `offset`, sized by
- * `size` and turned by `rotation`, facing the camera as the render mode says; `StretchedBillBoard` also reads
- * `velocity` (the velocity scaled by the speed factor, and the length factor in `w`).
+ * The unlit node material of sprite particles. In the billboard modes it places each instance of the quad at the
+ * particle's `offset`, sized by `size` and turned by `rotation`, facing the camera as the render mode says;
+ * `StretchedBillBoard` also reads `velocity` (the velocity scaled by the speed factor, and the length factor in `w`).
+ * In `Mesh` mode each instance of the mesh is placed by {@link transformMeshParticle}.
  */
 export class ParticleSpriteNodeMaterial extends NodeMaterial {
     static get type() {
@@ -37,7 +39,7 @@ export class ParticleSpriteNodeMaterial extends NodeMaterial {
     }
 
     /**
-     * One of the billboard render modes. Changing it rebuilds the shader.
+     * The render mode, any but `Trail`. Changing it rebuilds the shader.
      * @type {RenderMode}
      */
     get renderMode(): RenderMode {
@@ -66,7 +68,19 @@ export class ParticleSpriteNodeMaterial extends NodeMaterial {
         return outputNode;
     }
 
-    setupPositionView(): Node {
+    setupPosition(builder: NodeBuilder): Node {
+        const position = super.setupPosition(builder);
+        if (this.renderMode === RenderMode.Mesh) {
+            transformMeshParticle(builder);
+        }
+        return position;
+    }
+
+    setupPositionView(builder: NodeBuilder): Node {
+        if (this.renderMode === RenderMode.Mesh) {
+            return super.setupPositionView(builder);
+        }
+
         const offset = attribute('offset', 'vec3');
         const size = attribute('size', 'vec3');
 

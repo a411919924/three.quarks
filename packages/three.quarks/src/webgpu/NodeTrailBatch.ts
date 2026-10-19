@@ -33,6 +33,6 @@ export class NodeTrailBatch extends TrailBatch {
         });
     }
 
-    // Only soft particles read the depth texture, and the node batches do not support them yet.
+    // Trails have no soft particles, in the WebGL batches either.
     applyDepthTexture(): void {}
 }

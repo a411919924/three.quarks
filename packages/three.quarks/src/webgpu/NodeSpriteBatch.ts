@@ -1,25 +1,42 @@
-import {Texture} from 'three';
+import {Material, Texture} from 'three';
 import type {Node} from 'three/webgpu';
 import {attribute, vec4} from 'three/tsl';
 import {RenderMode, SpriteBatch} from 'three.quarks';
+import {ParticleMeshPhysicalNodeMaterial} from './materials/ParticleMeshPhysicalNodeMaterial';
+import {ParticleMeshStandardNodeMaterial} from './materials/ParticleMeshStandardNodeMaterial';
 import {ParticleSpriteNodeMaterial} from './materials/ParticleSpriteNodeMaterial';
-import {outputToWorkingColorSpace, tileTexture} from './nodes/ParticleNodes';
+import {outputToWorkingColorSpace, softParticleFade, tileTexture, tileUVContext} from './nodes/ParticleNodes';
 
 /**
  * A {@link SpriteBatch} that renders with a node material, for three's WebGPURenderer.
  */
 export class NodeSpriteBatch extends SpriteBatch {
+    private depthTexture: Texture | null = null;
+
     rebuildMaterial() {
         this.layers.mask = this.settings.layers.mask;
 
-        if (this.settings.renderMode === RenderMode.Mesh) {
-            throw new Error('NodeSpriteBatch: RenderMode.Mesh is not supported yet');
-        }
-        if (this.settings.softParticles) {
-            throw new Error('NodeSpriteBatch: soft particles are not supported yet');
+        const material = this.settings.material;
+        if (
+            this.settings.renderMode === RenderMode.Mesh &&
+            (material.type === 'MeshStandardMaterial' || material.type === 'MeshPhysicalMaterial')
+        ) {
+            const litMaterial =
+                material.type === 'MeshStandardMaterial'
+                    ? new ParticleMeshStandardNodeMaterial()
+                    : new ParticleMeshPhysicalNodeMaterial();
+            // Takes the material's properties as WebGPURenderer does when it renders a classic material.
+            for (const key in material) {
+                if (key !== 'uuid') (litMaterial as any)[key] = (material as any)[key];
+            }
+            litMaterial.vertexColors = true;
+            if (this.settings.uTileCount > 1 || this.settings.vTileCount > 1) {
+                litMaterial.contextNode = tileUVContext(this.settings.uTileCount, this.settings.vTileCount);
+            }
+            this.material = litMaterial;
+            return;
         }
 
-        const material = this.settings.material;
         const map: Texture | null = (material as any).map;
         let color: Node = attribute('color', 'vec4');
         if (map) {
@@ -27,9 +44,16 @@ export class NodeSpriteBatch extends SpriteBatch {
                 tileTexture(map, this.settings.uTileCount, this.settings.vTileCount, this.settings.blendTiles)
             );
         }
-        let colorNode = outputToWorkingColorSpace(color);
+        // The WebGL batches fade the color, the swapped alpha included, before writing it.
+        let fadedColor = color;
+        if (this.settings.softParticles && this.depthTexture) {
+            fadedColor = color.mul(
+                softParticleFade(this.depthTexture, this.settings.softNearFade, this.settings.softFarFade)
+            );
+        }
+        let colorNode = outputToWorkingColorSpace(fadedColor);
         if (material.defines && material.defines['USE_COLOR_AS_ALPHA'] !== undefined) {
-            colorNode = vec4(colorNode.rgb, color.r);
+            colorNode = vec4(colorNode.rgb, fadedColor.r);
         }
 
         this.material = new ParticleSpriteNodeMaterial({
@@ -50,6 +74,13 @@ export class NodeSpriteBatch extends SpriteBatch {
         });
     }
 
-    // Only soft particles read the depth texture, and the node batches do not support them yet.
-    applyDepthTexture(): void {}
+    applyDepthTexture(depthTexture: Texture | null): void {
+        if (this.depthTexture === depthTexture) return;
+        this.depthTexture = depthTexture;
+        // Only the unlit material fades soft particles; the WebGL lit shader has no soft-particle code either.
+        if (this.settings.softParticles && this.material instanceof ParticleSpriteNodeMaterial) {
+            (this.material as Material).dispose();
+            this.rebuildMaterial();
+        }
+    }
 }
