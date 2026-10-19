@@ -10,6 +10,30 @@ export class ParticleMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
         return 'ParticleMeshStandardNodeMaterial';
     }
 
+    /**
+     * Number of horizontal tiles in the textures, read by {@link tileUVContext}.
+     * @type {number}
+     */
+    uTileCount = 1;
+
+    /**
+     * Number of vertical tiles in the textures, read by {@link tileUVContext}.
+     * @type {number}
+     */
+    vTileCount = 1;
+
+    copy(source: ParticleMeshStandardNodeMaterial): this {
+        this.uTileCount = source.uTileCount;
+        this.vTileCount = source.vTileCount;
+        return super.copy(source);
+    }
+
+    // three keys numeric properties only as zero or nonzero, but an opaque material writes alpha 1 only with
+    // NormalBlending.
+    customProgramCacheKey(): string {
+        return `${super.customProgramCacheKey()}:${this.blending}`;
+    }
+
     setupPosition(builder: NodeBuilder): Node {
         const position = super.setupPosition(builder);
         transformMeshParticle(builder);

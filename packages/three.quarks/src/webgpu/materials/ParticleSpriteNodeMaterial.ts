@@ -1,3 +1,4 @@
+import {Texture} from 'three';
 import {NodeMaterial} from 'three/webgpu';
 import type {Node, NodeBuilder, NodeMaterialParameters} from 'three/webgpu';
 import {
@@ -14,17 +15,25 @@ import {
     vec4,
 } from 'three/tsl';
 import {RenderMode} from 'three.quarks';
-import {transformMeshParticle} from '../nodes/ParticleNodes';
+import {outputToWorkingColorSpace, softParticleFade, transformMeshParticle} from '../nodes/ParticleNodes';
 
 export interface ParticleSpriteNodeMaterialParameters extends NodeMaterialParameters {
     renderMode?: RenderMode;
+    map?: Texture | null;
+    uTileCount?: number;
+    vTileCount?: number;
+    useColorAsAlpha?: boolean;
+    depthTexture?: Texture | null;
+    softNearFade?: number;
+    softFarFade?: number;
 }
 
 /**
  * The unlit node material of sprite particles. In the billboard modes it places each instance of the quad at the
  * particle's `offset`, sized by `size` and turned by `rotation`, facing the camera as the render mode says;
  * `StretchedBillBoard` also reads `velocity` (the velocity scaled by the speed factor, and the length factor in `w`).
- * In `Mesh` mode each instance of the mesh is placed by {@link transformMeshParticle}.
+ * In `Mesh` mode each instance of the mesh is placed by {@link transformMeshParticle}. Its `colorNode` usually comes
+ * from {@link particleColor}, which reads `map`, `uTileCount` and `vTileCount` from the material.
  */
 export class ParticleSpriteNodeMaterial extends NodeMaterial {
     static get type() {
@@ -32,6 +41,50 @@ export class ParticleSpriteNodeMaterial extends NodeMaterial {
     }
 
     private _renderMode: RenderMode = RenderMode.BillBoard;
+
+    /**
+     * The texture of the particles, a sheet of `uTileCount` by `vTileCount` tiles. Whether there is one, and whether it
+     * has more than one tile, is fixed by the `colorNode` from {@link particleColor}.
+     * @type {Texture | null}
+     */
+    map: Texture | null = null;
+
+    /**
+     * Number of horizontal tiles in `map`.
+     * @type {number}
+     */
+    uTileCount = 1;
+
+    /**
+     * Number of vertical tiles in `map`.
+     * @type {number}
+     */
+    vTileCount = 1;
+
+    /**
+     * Whether the red channel of the color is written as its alpha. Set `needsUpdate` after changing it.
+     * @type {boolean}
+     */
+    useColorAsAlpha = false;
+
+    /**
+     * The scene's depth, rendered with the same camera, which soft particles fade into; null draws them hard. Set
+     * `needsUpdate` when it changes between null and a texture.
+     * @type {Texture | null}
+     */
+    depthTexture: Texture | null = null;
+
+    /**
+     * Distance in front of the scene's depth where a soft particle starts to show.
+     * @type {number}
+     */
+    softNearFade = 0;
+
+    /**
+     * Distance in front of the scene's depth where a soft particle is fully visible.
+     * @type {number}
+     */
+    softFarFade = 1;
 
     constructor(parameters?: ParticleSpriteNodeMaterialParameters) {
         super();
@@ -55,12 +108,33 @@ export class ParticleSpriteNodeMaterial extends NodeMaterial {
 
     copy(source: ParticleSpriteNodeMaterial): this {
         this.renderMode = source.renderMode;
+        this.map = source.map;
+        this.uTileCount = source.uTileCount;
+        this.vTileCount = source.vTileCount;
+        this.useColorAsAlpha = source.useColorAsAlpha;
+        this.depthTexture = source.depthTexture;
+        this.softNearFade = source.softNearFade;
+        this.softFarFade = source.softFarFade;
         return super.copy(source);
     }
 
-    // The render mode changes the shader, and three keys numeric properties only as zero or nonzero.
+    // three keys numeric properties only as zero or nonzero, but the shader depends on the render mode, and an opaque
+    // material writes alpha 1 only with NormalBlending.
     customProgramCacheKey(): string {
-        return `${super.customProgramCacheKey()}:${this.renderMode}`;
+        return `${super.customProgramCacheKey()}:${this.renderMode}:${this.blending}`;
+    }
+
+    // As the WebGL batches: the color-as-alpha swap and the soft fade come after the alpha test, and the color is
+    // written unconverted.
+    setupOutput(builder: NodeBuilder, outputNode: Node): Node {
+        let color = outputNode;
+        if (this.useColorAsAlpha) {
+            color = vec4(color.rgb, color.r);
+        }
+        if (this.depthTexture) {
+            color = color.mul(softParticleFade());
+        }
+        return super.setupOutput(builder, outputToWorkingColorSpace(color));
     }
 
     // premultipliedAlpha only selects the premultiplied blend factors, as in the WebGL batches.

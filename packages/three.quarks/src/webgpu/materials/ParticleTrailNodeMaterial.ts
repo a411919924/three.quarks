@@ -1,3 +1,4 @@
+import {Texture} from 'three';
 import {NodeMaterial} from 'three/webgpu';
 import type {Node, NodeBuilder, NodeMaterialParameters} from 'three/webgpu';
 import {
@@ -12,19 +13,47 @@ import {
     vec2,
     vec4,
 } from 'three/tsl';
+import {outputToWorkingColorSpace} from '../nodes/ParticleNodes';
+
+export interface ParticleTrailNodeMaterialParameters extends NodeMaterialParameters {
+    map?: Texture | null;
+}
 
 /**
  * The node material of particle trails. It widens each point of the ribbon to `width` across the screen-space
- * direction from `previous` to `next`, on the side the `side` attribute (-1 or 1) says.
+ * direction from `previous` to `next`, on the side the `side` attribute (-1 or 1) says. Its `colorNode` usually comes
+ * from {@link particleColor}, which reads `map` from the material.
  */
 export class ParticleTrailNodeMaterial extends NodeMaterial {
     static get type() {
         return 'ParticleTrailNodeMaterial';
     }
 
-    constructor(parameters?: NodeMaterialParameters) {
+    /**
+     * The texture of the trail.
+     * @type {Texture | null}
+     */
+    map: Texture | null = null;
+
+    constructor(parameters?: ParticleTrailNodeMaterialParameters) {
         super();
         this.setValues(parameters);
+    }
+
+    copy(source: ParticleTrailNodeMaterial): this {
+        this.map = source.map;
+        return super.copy(source);
+    }
+
+    // three keys numeric properties only as zero or nonzero, but an opaque material writes alpha 1 only with
+    // NormalBlending.
+    customProgramCacheKey(): string {
+        return `${super.customProgramCacheKey()}:${this.blending}`;
+    }
+
+    // The WebGL batches write the color unconverted.
+    setupOutput(builder: NodeBuilder, outputNode: Node): Node {
+        return super.setupOutput(builder, outputToWorkingColorSpace(outputNode));
     }
 
     // premultipliedAlpha only selects the premultiplied blend factors, as in the WebGL batches.

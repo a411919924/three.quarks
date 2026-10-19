@@ -1,4 +1,5 @@
-import {Camera, CubeTexture, OrthographicCamera, Texture, Vector2} from 'three';
+import {Camera, CubeTexture, OrthographicCamera, Texture} from 'three';
+import {MaterialReferenceNode} from 'three/webgpu';
 import type {ContextNode, Node, NodeBuilder, TextureNode} from 'three/webgpu';
 import {
     attribute,
@@ -11,6 +12,7 @@ import {
     fract,
     Fn,
     mat4,
+    materialReference,
     mix,
     mod,
     normalLocal,
@@ -21,9 +23,7 @@ import {
     positionView,
     saturate,
     screenUV,
-    texture,
     transformNormal,
-    uniform,
     uv,
     vec2,
     vec3,
@@ -31,61 +31,87 @@ import {
     vertexStage,
 } from 'three/tsl';
 
+// The nodes below read each material's own values through materialReference(), so that materials of one kind share
+// one node graph and three builds their shader once.
+
+const uvTile = attribute('uvTile', 'float');
+const tileCount = vec2(materialReference('uTileCount', 'float'), materialReference('vTileCount', 'float'));
+
 // Maps a UV into a tile of the sprite sheet; tiles count row by row from the top left.
-function tileUV(uvNode: Node, tileCount: Node, tile: Node): Node {
+function tileUV(uvNode: Node, tile: Node): Node {
     return vertexStage(
         uvNode.add(vec2(mod(tile, tileCount.x), tileCount.y.sub(floor(tile.div(tileCount.x))).sub(1))).div(tileCount)
     );
 }
 
-/**
- * Samples a sprite sheet at the particle's tile (the `uvTile` attribute). Tiles count row by row from the top left;
- * with `blendTiles`, a fractional tile blends into the next one.
- * @param {Texture} map - The sprite sheet.
- * @param {number} uTileCount - Number of horizontal tiles.
- * @param {number} vTileCount - Number of vertical tiles.
- * @param {boolean} blendTiles - Whether to blend a fractional tile into the next one.
- * @returns {Node} The texel.
- */
-export function tileTexture(map: Texture, uTileCount: number, vTileCount: number, blendTiles: boolean): Node {
-    if (uTileCount <= 1 && vTileCount <= 1) {
-        return texture(map, uv());
+// A texture of the material that ignores the texture's own transform, as the WebGL batches sample their maps.
+class UntransformedTextureReferenceNode extends MaterialReferenceNode {
+    setNodeType(uniformType: string): void {
+        super.setNodeType(uniformType);
+        (this.node as TextureNode).updateMatrix = false;
     }
-    const tileCount = uniform(new Vector2(uTileCount, vTileCount));
-    const uvTile = attribute('uvTile', 'float');
-    const texel = texture(map, tileUV(uv(), tileCount, floor(uvTile)));
-    if (!blendTiles) {
-        return texel;
-    }
-    return mix(texel, texture(map, tileUV(uv(), tileCount, ceil(uvTile))), vertexStage(fract(uvTile)));
 }
+
+// A texture of the material, sampled at the given UV.
+function materialTextureAt(name: string, uvNode: Node): Node {
+    return context(new UntransformedTextureReferenceNode(name, 'texture'), {getUV: () => uvNode});
+}
+
+const colorNodes = new Map<string, Node>();
+
+/**
+ * The color of a particle: its `color` attribute times its texel of the material's `map`. With tiles, the texel is
+ * taken from the particle's tile (the `uvTile` attribute) of a sheet of `uTileCount` by `vTileCount` tiles, counted
+ * row by row from the top left; with `blendTiles`, a fractional tile blends into the next one. Materials with the
+ * same arguments get the same node.
+ * @param {boolean} hasMap - Whether the material has a map.
+ * @param {boolean} tiled - Whether the map is a sheet of more than one tile.
+ * @param {boolean} blendTiles - Whether to blend a fractional tile into the next one.
+ * @returns {Node} The color.
+ */
+export function particleColor(hasMap: boolean, tiled: boolean, blendTiles: boolean): Node {
+    const key = !hasMap ? 'color' : !tiled ? 'map' : blendTiles ? 'blended tiles' : 'tiles';
+    let colorNode = colorNodes.get(key);
+    if (colorNode === undefined) {
+        const color = attribute('color', 'vec4');
+        if (!hasMap) {
+            colorNode = color;
+        } else if (!tiled) {
+            colorNode = color.mul(materialTextureAt('map', uv()));
+        } else {
+            let texel = materialTextureAt('map', tileUV(uv(), floor(uvTile)));
+            if (blendTiles) {
+                texel = mix(texel, materialTextureAt('map', tileUV(uv(), ceil(uvTile))), vertexStage(fract(uvTile)));
+            }
+            colorNode = color.mul(texel);
+        }
+        colorNodes.set(key, colorNode);
+    }
+    return colorNode;
+}
+
+// One tiled UV per UV channel, so that textures sharing a channel share a varying.
+const tiledUVs = new Map<number, Node>();
 
 /**
  * A material context that samples the material's 2D textures at the particle's tile (the `uvTile` attribute rounded
- * down), for lit mesh particles. three applies a texture's own transform after it, and keeps normal maps out of a
- * material's context, so the particle materials hand it to their normals themselves; bump maps stay untiled.
- * @param {number} uTileCount - Number of horizontal tiles.
- * @param {number} vTileCount - Number of vertical tiles.
- * @returns {ContextNode} The context, for `material.contextNode`.
+ * down, in a sheet of the material's `uTileCount` by `vTileCount` tiles), for lit mesh particles. three applies a
+ * texture's own transform after it, and keeps normal maps out of a material's context, so the particle materials hand
+ * it to their normals themselves; bump maps stay untiled.
+ * @type {ContextNode}
  */
-export function tileUVContext(uTileCount: number, vTileCount: number): ContextNode {
-    const tileCount = uniform(new Vector2(uTileCount, vTileCount));
-    const tile = floor(attribute('uvTile', 'float'));
-    // One tiled UV per UV channel, so that textures sharing a channel share a varying.
-    const tiledUVs = new Map<number, Node>();
-    return context({
-        getUV: (textureNode: TextureNode) => {
-            const map = textureNode.value as Texture;
-            if ((map as CubeTexture).isCubeTexture) return null;
-            let tiledUV = tiledUVs.get(map.channel);
-            if (!tiledUV) {
-                tiledUV = tileUV(uv(map.channel), tileCount, tile);
-                tiledUVs.set(map.channel, tiledUV);
-            }
-            return tiledUV;
-        },
-    });
-}
+export const tileUVContext: ContextNode = context({
+    getUV: (textureNode: TextureNode) => {
+        const map = textureNode.value as Texture;
+        if ((map as CubeTexture).isCubeTexture) return null;
+        let tiledUV = tiledUVs.get(map.channel);
+        if (tiledUV === undefined) {
+            tiledUV = tileUV(uv(map.channel), floor(uvTile));
+            tiledUVs.set(map.channel, tiledUV);
+        }
+        return tiledUV;
+    },
+});
 
 /**
  * Converts a color from the renderer's output color space to the working color space. The WebGL batches write their
@@ -141,16 +167,13 @@ export function transformMeshParticle(builder: NodeBuilder): void {
 }
 
 /**
- * How visible a soft particle is where it nears the scene behind it: 0 up to `nearFade` in front of the scene's depth
- * in `depthTexture`, rising to 1 at `farFade`.
- * @param {Texture} depthTexture - The scene's depth, rendered with the same camera.
- * @param {number} nearFade - Distance in front of the scene where the particle starts to show.
- * @param {number} farFade - Distance in front of the scene where the particle is fully visible.
+ * How visible a soft particle is where it nears the scene behind it: 0 up to the material's `softNearFade` in front of
+ * the scene's depth in its `depthTexture`, rising to 1 at its `softFarFade`.
  * @returns {Node} The fade, from 0 to 1.
  */
-export function softParticleFade(depthTexture: Texture, nearFade: number, farFade: number): Node {
+export function softParticleFade(): Node {
     const sceneViewZ = Fn((builder: NodeBuilder) => {
-        const depth = texture(depthTexture, screenUV);
+        const depth = materialTextureAt('depthTexture', screenUV);
         if (builder.renderer.logarithmicDepthBuffer) return logarithmicDepthToViewZ(depth, cameraNear, cameraFar);
         // three's NodeBuilder carries the camera being rendered; its type declarations leave it out.
         const camera = (builder as NodeBuilder & {camera: Camera}).camera;
@@ -159,6 +182,7 @@ export function softParticleFade(depthTexture: Texture, nearFade: number, farFad
         }
         return perspectiveDepthToViewZ(depth, cameraNear, cameraFar);
     })();
-    const fade = uniform(new Vector2(nearFade, 1 / (farFade - nearFade)));
-    return saturate(sceneViewZ.negate().sub(fade.x).add(positionView.z).mul(fade.y));
+    const nearFade = materialReference('softNearFade', 'float');
+    const farFade = materialReference('softFarFade', 'float');
+    return saturate(sceneViewZ.negate().sub(nearFade).add(positionView.z).div(farFade.sub(nearFade)));
 }
