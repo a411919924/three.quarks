@@ -117,6 +117,27 @@ QuarksUtil.setAutoDestroy(instance, true); // Auto-cleanup when finished
 QuarksUtil.play(instance);
 ```
 
+## 🖥️ WebGPURenderer
+
+three's `WebGPURenderer` compiles node materials rather than `ShaderMaterial`, so render with the batched renderer from the `three.quarks/webgpu` entry. Particle systems, behaviors and effect JSON stay the same, and it runs on both of `WebGPURenderer`'s backends (WebGPU and WebGL 2):
+
+```javascript
+import { WebGPURenderer } from 'three/webgpu';
+import { QuarksLoader, QuarksUtil } from 'three.quarks';
+import { NodeBatchedRenderer } from 'three.quarks/webgpu';
+
+const renderer = new WebGPURenderer();
+const batchRenderer = new NodeBatchedRenderer();
+scene.add(batchRenderer);
+
+new QuarksLoader().load('effects/explosion.json', (effect) => {
+    QuarksUtil.addToBatchRenderer(effect, batchRenderer);
+    scene.add(effect);
+});
+```
+
+The node batches draw what the WebGL batches draw. With the default sRGB output, though, `WebGPURenderer` blends and tone maps in linear space, so faint or overlapping transparent particles come out brighter than with `WebGLRenderer`.
+
 ## ⚛️ React Three Fiber
 
 Use the `quarks.r3f` package for declarative React integration:
@@ -234,7 +255,7 @@ This project is a monorepo with modular packages:
 
 ## 🗺️ Roadmap
 
-- 🔲 WebGPU rendering support
+- ✅ WebGPU rendering support (`three.quarks/webgpu`)
 - 🔲 WebAssembly particle simulation
 - 🔲 Node-based scriptable particle systems
 - 🔲 Cross-platform native plugins
