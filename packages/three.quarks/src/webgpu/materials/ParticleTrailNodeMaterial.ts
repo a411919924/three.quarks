@@ -1,28 +1,19 @@
 import {Texture} from 'three';
 import {NodeMaterial} from 'three/webgpu';
 import type {Node, NodeBuilder, NodeMaterialParameters} from 'three/webgpu';
-import {
-    all,
-    attribute,
-    cameraProjectionMatrix,
-    Fn,
-    If,
-    modelViewMatrix,
-    normalize,
-    positionGeometry,
-    vec2,
-    vec4,
-} from 'three/tsl';
-import {outputToWorkingColorSpace} from '../nodes/ParticleNodes';
+import {all, cameraProjectionMatrix, Fn, If, modelViewMatrix, normalize, select, vec2, vec4} from 'three/tsl';
+import {outputToWorkingColorSpace, trailVertex} from '../nodes/ParticleNodes';
 
 export interface ParticleTrailNodeMaterialParameters extends NodeMaterialParameters {
     map?: Texture | null;
+    pointsNode?: Node | null;
 }
 
 /**
- * The node material of particle trails. It widens each point of the ribbon to `width` across the screen-space
- * direction from `previous` to `next`, on the side the `side` attribute (-1 or 1) says. Its `colorNode` usually comes
- * from {@link particleColor}, which reads `map` from the material.
+ * The node material of particle trails. It draws the ribbon from the trail points in `pointsNode` (see
+ * {@link trailVertex}), with no vertex attributes: each point is widened to its width across the screen-space
+ * direction from the point before it to the point after it. Its `colorNode` usually comes from {@link trailColor},
+ * which reads `map` from the material.
  */
 export class ParticleTrailNodeMaterial extends NodeMaterial {
     static get type() {
@@ -35,6 +26,12 @@ export class ParticleTrailNodeMaterial extends NodeMaterial {
      */
     map: Texture | null = null;
 
+    /**
+     * The trail points, a read-only storage node of vec4, three per point. Required.
+     * @type {Node | null}
+     */
+    pointsNode: Node | null = null;
+
     constructor(parameters?: ParticleTrailNodeMaterialParameters) {
         super();
         this.setValues(parameters);
@@ -42,6 +39,7 @@ export class ParticleTrailNodeMaterial extends NodeMaterial {
 
     copy(source: ParticleTrailNodeMaterial): this {
         this.map = source.map;
+        this.pointsNode = source.pointsNode;
         return super.copy(source);
     }
 
@@ -61,16 +59,38 @@ export class ParticleTrailNodeMaterial extends NodeMaterial {
         return outputNode;
     }
 
-    setupModelViewProjection(): Node {
-        return Fn(() => {
-            const modelViewProjection = cameraProjectionMatrix.mul(modelViewMatrix);
-            const clipPosition = modelViewProjection.mul(vec4(positionGeometry, 1)).toVar();
-            const previousClip = modelViewProjection.mul(vec4(attribute('previous', 'vec3'), 1));
-            const nextClip = modelViewProjection.mul(vec4(attribute('next', 'vec3'), 1));
+    // The geometry has no position attribute: these replace the defaults that read it.
+    setupPosition(): Node {
+        return trailVertex(this.pointsNode!).position;
+    }
 
-            const current = clipPosition.xy.div(clipPosition.w);
-            const previous = previousClip.xy.div(previousClip.w);
-            const next = nextClip.xy.div(nextClip.w);
+    setupPositionView(): Node {
+        return modelViewMatrix.mul(vec4(trailVertex(this.pointsNode!).position, 1)).xyz;
+    }
+
+    setupModelViewProjection(): Node {
+        const vertex = trailVertex(this.pointsNode!);
+        return Fn(() => {
+            // Everything the branches below share is computed before them, as the WebGL batch does; a node first
+            // used inside one branch would otherwise be declared only there.
+            const position = vertex.position.toVar();
+            const previousPosition = vertex.previous.toVar();
+            const nextPosition = vertex.next.toVar();
+            const modelViewProjection = cameraProjectionMatrix.mul(modelViewMatrix);
+            const clipPosition = modelViewProjection.mul(vec4(position, 1)).toVar();
+            const previousClip = modelViewProjection.mul(vec4(previousPosition, 1));
+            const nextClip = modelViewProjection.mul(vec4(nextPosition, 1));
+
+            // The WebGL batch tests whether the projected neighbours equal the projected point. A neighbour stored
+            // at the same position takes the point's own projection, so the test stays exact where the shader
+            // compiler rounds two projections of one position differently.
+            const current = clipPosition.xy.div(clipPosition.w).toVar();
+            const previous = select(
+                all(previousPosition.equal(position)),
+                current,
+                previousClip.xy.div(previousClip.w)
+            ).toVar();
+            const next = select(all(nextPosition.equal(position)), current, nextClip.xy.div(nextClip.w)).toVar();
 
             const dir = vec2().toVar();
             If(all(next.equal(current)), () => {
@@ -83,10 +103,12 @@ export class ParticleTrailNodeMaterial extends NodeMaterial {
                     dir.assign(normalize(normalize(current.sub(previous)).add(normalize(next.sub(current)))));
                 });
 
-            const normal = vec4(vec2(dir.y.negate(), dir.x).mul(attribute('width', 'float').mul(0.5)), 0, 1).mul(
+            const normal = vec4(vec2(dir.y.negate(), dir.x).mul(vertex.width.mul(0.5)), 0, 1).mul(
                 cameraProjectionMatrix
             );
-            return vec4(clipPosition.xy.add(normal.xy.mul(attribute('side', 'float'))), clipPosition.zw);
+            const widened = vec4(clipPosition.xy.add(normal.xy.mul(vertex.side)), clipPosition.zw);
+            // All six vertices of the empty segment after a trail's last point land on one spot.
+            return select(vertex.skipped, vec4(0), widened);
         })();
     }
 }

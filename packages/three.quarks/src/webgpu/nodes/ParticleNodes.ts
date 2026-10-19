@@ -23,11 +23,14 @@ import {
     positionView,
     saturate,
     screenUV,
+    select,
+    uint,
     transformNormal,
     uv,
     vec2,
     vec3,
     vec4,
+    vertexIndex,
     vertexStage,
 } from 'three/tsl';
 
@@ -185,4 +188,75 @@ export function softParticleFade(): Node {
     const nearFade = materialReference('softNearFade', 'float');
     const farFade = materialReference('softFarFade', 'float');
     return saturate(sceneViewZ.negate().sub(nearFade).add(positionView.z).div(farFade.sub(nearFade)));
+}
+
+/**
+ * A vertex of a trail ribbon, read from the trail's points: `points` holds three vec4 per point, its position and
+ * width, its color, and its u, its v on either side and its flags (1: first point of its trail, 2: last). Each
+ * segment from a point to the next draws two triangles, six vertices; the segment from a trail's last point draws
+ * nothing.
+ */
+export interface TrailVertex {
+    /** Position of the vertex's point. */
+    position: Node;
+    /** Position of the point before it in its trail, or its own for the first. */
+    previous: Node;
+    /** Position of the point after it in its trail, or its own for the last. */
+    next: Node;
+    width: Node;
+    /** 1 or -1: the side of the ribbon. */
+    side: Node;
+    color: Node;
+    uv: Node;
+    /** Whether the vertex belongs to the empty segment after a trail's last point. */
+    skipped: Node;
+}
+
+const trailVertices = new WeakMap<Node, TrailVertex>();
+
+/**
+ * Decodes the trail vertex for `vertexIndex` from a trail's points; one decoding per points node, so the position
+ * and the color nodes share it.
+ * @param {Node} points - A read-only storage node of vec4, three per point.
+ * @returns {TrailVertex} The vertex.
+ */
+export function trailVertex(points: Node): TrailVertex {
+    let vertex = trailVertices.get(points);
+    if (vertex === undefined) {
+        // Corners 0..5 of a segment from point p: (p, +1), (p, -1), (p+1, +1), (p+1, +1), (p, -1), (p+1, -1), the
+        // order of the WebGL batch's two triangles.
+        const segment = vertexIndex.div(6);
+        const corner = vertexIndex.mod(6);
+        const point = segment.add(uint(0b101100).shiftRight(corner).bitAnd(1));
+        const record = (index: Node, offset: number) => points.element(index.mul(3).add(offset));
+        const flags = record(point, 2).w;
+        const first = mod(flags, 2).greaterThan(0.5);
+        const last = flags.greaterThan(1.5);
+        const side = select(uint(0b110010).shiftRight(corner).bitAnd(1).equal(1), -1, 1);
+        const head = record(point, 0);
+        const uvRecord = record(point, 2);
+        vertex = {
+            position: head.xyz,
+            previous: record(select(first, point, point.sub(1)), 0).xyz,
+            next: record(select(last, point, point.add(1)), 0).xyz,
+            width: head.w,
+            side,
+            color: vertexStage(record(point, 1)),
+            uv: vertexStage(vec2(uvRecord.x, select(side.greaterThan(0), uvRecord.y, uvRecord.z))),
+            skipped: record(segment, 2).w.greaterThan(1.5),
+        };
+        trailVertices.set(points, vertex);
+    }
+    return vertex;
+}
+
+/**
+ * The color of a trail vertex: its point's color times its texel of the material's `map`.
+ * @param {Node} points - The trail's points (see {@link trailVertex}).
+ * @param {boolean} hasMap - Whether the material has a map.
+ * @returns {Node} The color.
+ */
+export function trailColor(points: Node, hasMap: boolean): Node {
+    const {color, uv: trailUV} = trailVertex(points);
+    return hasMap ? color.mul(materialTextureAt('map', trailUV)) : color;
 }

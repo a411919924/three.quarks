@@ -138,6 +138,16 @@ new QuarksLoader().load('effects/explosion.json', (effect) => {
 
 The node batches draw what the WebGL batches draw. With the default sRGB output, though, `WebGPURenderer` blends and tone maps in linear space, so faint or overlapping transparent particles come out brighter than with `WebGLRenderer`.
 
+A new kind of effect builds its shaders the first time it is drawn. To keep that out of the frame where it appears, compile it once it is in the scene, for instance while loading:
+
+```javascript
+QuarksUtil.addToBatchRenderer(effect, batchRenderer);
+scene.add(effect);
+await renderer.compileAsync(scene, camera);
+```
+
+With the default sRGB output this needs three r184 or later; earlier `compileAsync` compiles for the canvas while `render` draws into its own buffer.
+
 ## ⚛️ React Three Fiber
 
 Use the `quarks.r3f` package for declarative React integration:
