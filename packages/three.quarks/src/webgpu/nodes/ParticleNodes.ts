@@ -1,6 +1,6 @@
 import {Camera, CubeTexture, OrthographicCamera, Texture} from 'three';
 import {MaterialReferenceNode} from 'three/webgpu';
-import type {ContextNode, Node, NodeBuilder, TextureNode} from 'three/webgpu';
+import type {ContextNode, Node, NodeBuilder, StorageBufferNode, TextureNode} from 'three/webgpu';
 import {
     attribute,
     cameraFar,
@@ -32,16 +32,22 @@ import {
     vec4,
     vertexIndex,
     vertexStage,
+    viewportDepthTexture,
 } from 'three/tsl';
 
 // The nodes below read each material's own values through materialReference(), so that materials of one kind share
 // one node graph and three builds their shader once.
 
-const uvTile = attribute('uvTile', 'float');
-const tileCount = vec2(materialReference('uTileCount', 'float'), materialReference('vTileCount', 'float'));
+// A property of the material being drawn; three's typings leave materialReference without its node type.
+function materialProperty<TNodeType extends string>(name: string, type: TNodeType): Node<TNodeType> {
+    return materialReference(name, type) as unknown as Node<TNodeType>;
+}
+
+const uvTile = attribute<'float'>('uvTile', 'float');
+const tileCount = vec2(materialProperty('uTileCount', 'float'), materialProperty('vTileCount', 'float'));
 
 // Maps a UV into a tile of the sprite sheet; tiles count row by row from the top left.
-function tileUV(uvNode: Node, tile: Node): Node {
+function tileUV(uvNode: Node<'vec2'>, tile: Node<'float'>): Node<'vec2'> {
     return vertexStage(
         uvNode.add(vec2(mod(tile, tileCount.x), tileCount.y.sub(floor(tile.div(tileCount.x))).sub(1))).div(tileCount)
     );
@@ -56,11 +62,12 @@ class UntransformedTextureReferenceNode extends MaterialReferenceNode {
 }
 
 // A texture of the material, sampled at the given UV.
-function materialTextureAt(name: string, uvNode: Node): Node {
-    return context(new UntransformedTextureReferenceNode(name, 'texture'), {getUV: () => uvNode});
+function materialTextureAt(name: string, uvNode: Node<'vec2'>): Node<'vec4'> {
+    const reference = new UntransformedTextureReferenceNode(name, 'texture');
+    return context(reference, {getUV: () => uvNode}) as unknown as Node<'vec4'>;
 }
 
-const colorNodes = new Map<string, Node>();
+const colorNodes = new Map<string, Node<'vec4'>>();
 
 /**
  * The color of a particle: its `color` attribute times its texel of the material's `map`. With tiles, the texel is
@@ -72,11 +79,11 @@ const colorNodes = new Map<string, Node>();
  * @param {boolean} blendTiles - Whether to blend a fractional tile into the next one.
  * @returns {Node} The color.
  */
-export function particleColor(hasMap: boolean, tiled: boolean, blendTiles: boolean): Node {
+export function particleColor(hasMap: boolean, tiled: boolean, blendTiles: boolean): Node<'vec4'> {
     const key = !hasMap ? 'color' : !tiled ? 'map' : blendTiles ? 'blended tiles' : 'tiles';
     let colorNode = colorNodes.get(key);
     if (colorNode === undefined) {
-        const color = attribute('color', 'vec4');
+        const color: Node<'vec4'> = attribute<'vec4'>('color', 'vec4');
         if (!hasMap) {
             colorNode = color;
         } else if (!tiled) {
@@ -94,7 +101,7 @@ export function particleColor(hasMap: boolean, tiled: boolean, blendTiles: boole
 }
 
 // One tiled UV per UV channel, so that textures sharing a channel share a varying.
-const tiledUVs = new Map<number, Node>();
+const tiledUVs = new Map<number, Node<'vec2'>>();
 
 /**
  * A material context that samples the material's 2D textures at the particle's tile (the `uvTile` attribute rounded
@@ -103,7 +110,7 @@ const tiledUVs = new Map<number, Node>();
  * it to their normals themselves; bump maps stay untiled.
  * @type {ContextNode}
  */
-export const tileUVContext: ContextNode = context({
+export const tileUVContext: ContextNode<unknown> = context({
     getUV: (textureNode: TextureNode) => {
         const map = textureNode.value as Texture;
         if ((map as CubeTexture).isCubeTexture) return null;
@@ -123,18 +130,18 @@ export const tileUVContext: ContextNode = context({
  * @param {Node} color - An RGBA color in the output color space.
  * @returns {Node} The color in the working color space.
  */
-export const outputToWorkingColorSpace: (color: Node) => Node = Fn(([color]: [Node], builder: NodeBuilder) =>
+export const outputToWorkingColorSpace = Fn(([color]: [Node<'vec4'>], builder: NodeBuilder) =>
     colorSpaceToWorking(color, builder.renderer.outputColorSpace)
-);
+) as unknown as (color: Node<'vec4'>) => Node<'vec4'>;
 
 /**
  * The matrix that places a mesh particle: rotated by its `rotation` quaternion, scaled by `size` and moved to `offset`.
  * @returns {Node} The matrix.
  */
-export function meshParticleMatrix(): Node {
-    const q = attribute('rotation', 'vec4');
-    const size = attribute('size', 'vec3');
-    const offset = attribute('offset', 'vec3');
+export function meshParticleMatrix(): Node<'mat4'> {
+    const q = attribute<'vec4'>('rotation', 'vec4');
+    const size = attribute<'vec3'>('size', 'vec3');
+    const offset = attribute<'vec3'>('offset', 'vec3');
     const x2 = q.x.add(q.x);
     const y2 = q.y.add(q.y);
     const z2 = q.z.add(q.z);
@@ -163,20 +170,29 @@ export function meshParticleMatrix(): Node {
  */
 export function transformMeshParticle(builder: NodeBuilder): void {
     const matrix = meshParticleMatrix().toVar();
-    positionLocal.assign(matrix.mul(positionLocal).xyz);
-    if (builder.hasGeometryAttribute('normal')) {
+    positionLocal.assign(matrix.mul(vec4(positionLocal, 1)).xyz);
+    // three's typings leave out NodeBuilder.hasGeometryAttribute.
+    if ((builder as NodeBuilder & {hasGeometryAttribute(name: string): boolean}).hasGeometryAttribute('normal')) {
         normalLocal.assign(transformNormal(normalLocal, matrix));
     }
 }
 
+// The depth drawn so far in this render, which three copies before the first soft particles draw.
+const frameDepth = viewportDepthTexture();
+
 /**
  * How visible a soft particle is where it nears the scene behind it: 0 up to the material's `softNearFade` in front of
- * the scene's depth in its `depthTexture`, rising to 1 at its `softFarFade`.
+ * the scene's depth, rising to 1 at its `softFarFade`. The scene's depth is the material's `depthTexture`, or else the
+ * depth drawn so far in this render.
+ * @param {boolean} hasDepthTexture - Whether the material has a depth texture.
  * @returns {Node} The fade, from 0 to 1.
  */
-export function softParticleFade(): Node {
-    const sceneViewZ = Fn((builder: NodeBuilder) => {
-        const depth = materialTextureAt('depthTexture', screenUV);
+export function softParticleFade(hasDepthTexture: boolean): Node<'float'> {
+    const sceneViewZ = Fn((builder: NodeBuilder): Node<'float'> => {
+        // A depth texture samples to a float.
+        const depth = (hasDepthTexture
+            ? materialTextureAt('depthTexture', screenUV)
+            : frameDepth) as unknown as Node<'float'>;
         if (builder.renderer.logarithmicDepthBuffer) return logarithmicDepthToViewZ(depth, cameraNear, cameraFar);
         // three's NodeBuilder carries the camera being rendered; its type declarations leave it out.
         const camera = (builder as NodeBuilder & {camera: Camera}).camera;
@@ -185,8 +201,8 @@ export function softParticleFade(): Node {
         }
         return perspectiveDepthToViewZ(depth, cameraNear, cameraFar);
     })();
-    const nearFade = materialReference('softNearFade', 'float');
-    const farFade = materialReference('softFarFade', 'float');
+    const nearFade = materialProperty('softNearFade', 'float');
+    const farFade = materialProperty('softFarFade', 'float');
     return saturate(sceneViewZ.negate().sub(nearFade).add(positionView.z).div(farFade.sub(nearFade)));
 }
 
@@ -198,21 +214,21 @@ export function softParticleFade(): Node {
  */
 export interface TrailVertex {
     /** Position of the vertex's point. */
-    position: Node;
+    position: Node<'vec3'>;
     /** Position of the point before it in its trail, or its own for the first. */
-    previous: Node;
+    previous: Node<'vec3'>;
     /** Position of the point after it in its trail, or its own for the last. */
-    next: Node;
-    width: Node;
+    next: Node<'vec3'>;
+    width: Node<'float'>;
     /** 1 or -1: the side of the ribbon. */
-    side: Node;
-    color: Node;
-    uv: Node;
+    side: Node<'float'>;
+    color: Node<'vec4'>;
+    uv: Node<'vec2'>;
     /** Whether the vertex belongs to the empty segment after a trail's last point. */
-    skipped: Node;
+    skipped: Node<'bool'>;
 }
 
-const trailVertices = new WeakMap<Node, TrailVertex>();
+const trailVertices = new WeakMap<StorageBufferNode<'vec4'>, TrailVertex>();
 
 /**
  * Decodes the trail vertex for `vertexIndex` from a trail's points; one decoding per points node, so the position
@@ -220,7 +236,7 @@ const trailVertices = new WeakMap<Node, TrailVertex>();
  * @param {Node} points - A read-only storage node of vec4, three per point.
  * @returns {TrailVertex} The vertex.
  */
-export function trailVertex(points: Node): TrailVertex {
+export function trailVertex(points: StorageBufferNode<'vec4'>): TrailVertex {
     let vertex = trailVertices.get(points);
     if (vertex === undefined) {
         // Corners 0..5 of a segment from point p: (p, +1), (p, -1), (p+1, +1), (p+1, +1), (p, -1), (p+1, -1), the
@@ -228,7 +244,7 @@ export function trailVertex(points: Node): TrailVertex {
         const segment = vertexIndex.div(6);
         const corner = vertexIndex.mod(6);
         const point = segment.add(uint(0b101100).shiftRight(corner).bitAnd(1));
-        const record = (index: Node, offset: number) => points.element(index.mul(3).add(offset));
+        const record = (index: Node<'uint'>, offset: number) => points.element(index.mul(3).add(offset));
         const flags = record(point, 2).w;
         const first = mod(flags, 2).greaterThan(0.5);
         const last = flags.greaterThan(1.5);
@@ -256,7 +272,7 @@ export function trailVertex(points: Node): TrailVertex {
  * @param {boolean} hasMap - Whether the material has a map.
  * @returns {Node} The color.
  */
-export function trailColor(points: Node, hasMap: boolean): Node {
+export function trailColor(points: StorageBufferNode<'vec4'>, hasMap: boolean): Node<'vec4'> {
     const {color, uv: trailUV} = trailVertex(points);
     return hasMap ? color.mul(materialTextureAt('map', trailUV)) : color;
 }

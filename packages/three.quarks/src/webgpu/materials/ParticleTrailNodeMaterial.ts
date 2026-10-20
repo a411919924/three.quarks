@@ -1,12 +1,18 @@
 import {Texture} from 'three';
 import {NodeMaterial} from 'three/webgpu';
-import type {Node, NodeBuilder, NodeMaterialParameters} from 'three/webgpu';
-import {all, cameraProjectionMatrix, Fn, If, modelViewMatrix, normalize, select, vec2, vec4} from 'three/tsl';
+import type {Node, NodeBuilder, NodeMaterialParameters, StorageBufferNode} from 'three/webgpu';
+import {all, cameraProjectionMatrix, equal, Fn, If, modelViewMatrix, normalize, select, vec2, vec4} from 'three/tsl';
 import {outputToWorkingColorSpace, trailVertex} from '../nodes/ParticleNodes';
+
+// Whether two vectors are equal in every component. three's typings disagree between releases on what equal() returns
+// for vectors.
+function allEqual(a: Node, b: Node): Node<'bool'> {
+    return (all as (node: unknown) => Node<'bool'>)((equal as (a: Node, b: Node) => unknown)(a, b));
+}
 
 export interface ParticleTrailNodeMaterialParameters extends NodeMaterialParameters {
     map?: Texture | null;
-    pointsNode?: Node | null;
+    pointsNode?: StorageBufferNode<'vec4'> | null;
 }
 
 /**
@@ -30,7 +36,7 @@ export class ParticleTrailNodeMaterial extends NodeMaterial {
      * The trail points, a read-only storage node of vec4, three per point. Required.
      * @type {Node | null}
      */
-    pointsNode: Node | null = null;
+    pointsNode: StorageBufferNode<'vec4'> | null = null;
 
     constructor(parameters?: ParticleTrailNodeMaterialParameters) {
         super();
@@ -50,7 +56,7 @@ export class ParticleTrailNodeMaterial extends NodeMaterial {
     }
 
     // The WebGL batches write the color unconverted.
-    setupOutput(builder: NodeBuilder, outputNode: Node): Node {
+    setupOutput(builder: NodeBuilder, outputNode: Node<'vec4'>): Node {
         return super.setupOutput(builder, outputToWorkingColorSpace(outputNode));
     }
 
@@ -86,17 +92,17 @@ export class ParticleTrailNodeMaterial extends NodeMaterial {
             // compiler rounds two projections of one position differently.
             const current = clipPosition.xy.div(clipPosition.w).toVar();
             const previous = select(
-                all(previousPosition.equal(position)),
+                allEqual(previousPosition, position),
                 current,
                 previousClip.xy.div(previousClip.w)
             ).toVar();
-            const next = select(all(nextPosition.equal(position)), current, nextClip.xy.div(nextClip.w)).toVar();
+            const next = select(allEqual(nextPosition, position), current, nextClip.xy.div(nextClip.w)).toVar();
 
             const dir = vec2().toVar();
-            If(all(next.equal(current)), () => {
+            If(allEqual(next, current), () => {
                 dir.assign(normalize(current.sub(previous)));
             })
-                .ElseIf(all(previous.equal(current)), () => {
+                .ElseIf(allEqual(previous, current), () => {
                     dir.assign(normalize(next.sub(current)));
                 })
                 .Else(() => {

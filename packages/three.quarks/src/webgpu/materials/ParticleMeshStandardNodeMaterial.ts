@@ -42,7 +42,7 @@ export class ParticleMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
 
     // three builds normals outside the material's context; the tile context (see tileUVContext) applies to them too.
     setupNormal(): Node {
-        const normal = super.setupNormal();
+        const normal = super.setupNormal() as Node<'vec3'>;
         return this.contextNode ? normal.context(this.contextNode.value) : normal;
     }
 }

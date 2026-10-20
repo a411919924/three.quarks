@@ -23,6 +23,7 @@ export interface ParticleSpriteNodeMaterialParameters extends NodeMaterialParame
     uTileCount?: number;
     vTileCount?: number;
     useColorAsAlpha?: boolean;
+    softParticles?: boolean;
     depthTexture?: Texture | null;
     softNearFade?: number;
     softFarFade?: number;
@@ -68,8 +69,15 @@ export class ParticleSpriteNodeMaterial extends NodeMaterial {
     useColorAsAlpha = false;
 
     /**
-     * The scene's depth, rendered with the same camera, which soft particles fade into; null draws them hard. Set
-     * `needsUpdate` when it changes between null and a texture.
+     * Whether the particles fade where they near the scene behind them. Set `needsUpdate` after changing it.
+     * @type {boolean}
+     */
+    softParticles = false;
+
+    /**
+     * The scene's depth, rendered with the same camera, which soft particles fade into. null: for transparent
+     * particles, the depth this render has drawn before them, the opaque objects; opaque particles are drawn hard.
+     * Set `needsUpdate` when it changes between null and a texture.
      * @type {Texture | null}
      */
     depthTexture: Texture | null = null;
@@ -112,6 +120,7 @@ export class ParticleSpriteNodeMaterial extends NodeMaterial {
         this.uTileCount = source.uTileCount;
         this.vTileCount = source.vTileCount;
         this.useColorAsAlpha = source.useColorAsAlpha;
+        this.softParticles = source.softParticles;
         this.depthTexture = source.depthTexture;
         this.softNearFade = source.softNearFade;
         this.softFarFade = source.softFarFade;
@@ -126,13 +135,15 @@ export class ParticleSpriteNodeMaterial extends NodeMaterial {
 
     // As the WebGL batches: the color-as-alpha swap and the soft fade come after the alpha test, and the color is
     // written unconverted.
-    setupOutput(builder: NodeBuilder, outputNode: Node): Node {
+    setupOutput(builder: NodeBuilder, outputNode: Node<'vec4'>): Node {
         let color = outputNode;
         if (this.useColorAsAlpha) {
             color = vec4(color.rgb, color.r);
         }
-        if (this.depthTexture) {
-            color = color.mul(softParticleFade());
+        // The frame's depth holds what was drawn before the particles; only for transparent particles is that the
+        // opaque scene, so opaque ones fade only against a depth texture.
+        if (this.softParticles && (this.depthTexture !== null || this.transparent)) {
+            color = color.mul(softParticleFade(this.depthTexture !== null));
         }
         return super.setupOutput(builder, outputToWorkingColorSpace(color));
     }
@@ -155,11 +166,11 @@ export class ParticleSpriteNodeMaterial extends NodeMaterial {
             return super.setupPositionView(builder);
         }
 
-        const offset = attribute('offset', 'vec3');
-        const size = attribute('size', 'vec3');
+        const offset = attribute<'vec3'>('offset', 'vec3');
+        const size = attribute<'vec3'>('size', 'vec3');
 
         if (this.renderMode === RenderMode.StretchedBillBoard) {
-            const velocity = attribute('velocity', 'vec4');
+            const velocity = attribute<'vec4'>('velocity', 'vec4');
             const avgSize = size.x.add(size.y).mul(0.5);
             const mvPosition = modelViewMatrix.mul(vec4(offset, 1)).xyz;
             const viewVelocity = cameraViewMatrix.mul(vec4(modelNormalMatrix.mul(velocity.xyz), 0)).xyz;
@@ -169,7 +180,7 @@ export class ParticleSpriteNodeMaterial extends NodeMaterial {
                 .sub(viewVelocity.mul(positionGeometry.x.add(0.5).mul(lengthScale).mul(avgSize)));
         }
 
-        const rotated = rotate(positionGeometry.xy.mul(size.xy), attribute('rotation', 'float'));
+        const rotated = rotate(positionGeometry.xy.mul(size.xy), attribute<'float'>('rotation', 'float'));
         switch (this.renderMode) {
             case RenderMode.HorizontalBillBoard: {
                 const worldPosition = modelWorldMatrix

@@ -44,6 +44,7 @@ export class NodeSpriteBatch extends SpriteBatch {
             uTileCount: this.settings.uTileCount,
             vTileCount: this.settings.vTileCount,
             useColorAsAlpha: material.defines !== undefined && material.defines['USE_COLOR_AS_ALPHA'] !== undefined,
+            softParticles: this.settings.softParticles,
             softNearFade: this.settings.softNearFade,
             softFarFade: this.settings.softFarFade,
             fog: false,
