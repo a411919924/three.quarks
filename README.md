@@ -138,7 +138,7 @@ new QuarksLoader().load('effects/explosion.json', (effect) => {
 
 The node batches draw what the WebGL batches draw. With the default sRGB output, though, `WebGPURenderer` blends and tone maps in linear space, so faint or overlapping transparent particles come out brighter than with `WebGLRenderer`.
 
-Transparent soft particles need no `setDepthTexture` here: without one they fade against the depth the render has drawn before them, the opaque objects, which saves rendering the scene a second time. Opaque soft particles still need a depth texture. three cannot copy that depth with `stencil: true`, with a reversed depth buffer, or on the WebGL 2 backend with linear output and no tone mapping; give the particles a depth texture there.
+Transparent soft particles need no `setDepthTexture` here: without one they fade against the depth the render has drawn before them, the opaque objects, which saves rendering the scene a second time. Opaque soft particles still need a depth texture. three cannot copy that depth with `stencil: true`, nor when it draws straight to the canvas (linear output and no tone mapping) on the WebGL 2 backend or with a reversed depth buffer; give the particles a depth texture there.
 
 A new kind of effect builds its shaders the first time it is drawn. To keep that out of the frame where it appears, compile it once it is in the scene, for instance while loading:
 
