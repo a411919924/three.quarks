@@ -1,6 +1,6 @@
 {
   "name": "quarks.r3f",
-  "version": "0.17.1",
+  "version": "0.18.0",
   "description": "React Three Fiber integration for three.quarks particle systems",
   "type": "module",
   "types": "./dist/types/index.d.ts",
